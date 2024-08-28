@@ -1,0 +1,105 @@
+def latestIsoContents
+
+pipeline {
+    agent { label 'GridEngine' }
+    options {
+        timeout(time: 300, unit: 'MINUTES')
+        timestamps()
+    }
+    stages {
+        stage('Init') {
+            steps {
+                init_report()
+                script {
+                    latestIsoContents = get_iso_content()
+                }
+            }
+        }
+        stage('OSS') {
+            steps {
+
+                process_repos('OSS/')
+
+            }
+        }
+        stage('LITP') {
+            steps {
+
+                process_repos('LITP/')
+
+            }
+        }
+    }
+    post {
+        always {
+            archiveArtifacts artifacts: 'repo_2_rpm.csv', allowEmptyArchive: true
+        }
+    }
+}
+
+def process_repos(prefix) {
+    gerritQuery = 'ssh -p 29418 gerrit.ericsson.se gerrit ls-projects --prefix ' + prefix
+    repoList = sh(script: gerritQuery, returnStdout: true)
+    repoList.split('\n').each {
+        repo -> get_info(repo)
+    }
+}
+
+def get_info(repo) {
+    echo repo
+    rpm = ''
+    env.repo = repo
+
+    dir(repo) {
+        inIso = false
+        sh 'git archive --remote=ssh://gerritmirror-ha.lmera.ericsson.se:29418/${repo} HEAD pom.xml > pom.tar||true'
+        sh 'tar -xvf pom.tar||true'
+
+        def exists = fileExists 'pom.xml'
+        if (exists) {
+            try {
+                pom = readMavenPom file: 'pom.xml'
+                version = env.version_from_pom
+                modules = pom.getModules()
+                for (String module : modules) {
+                    matchRPMConvention = (module =~ /ERIC.*_CXP.*/)
+                    if (matchRPMConvention) {
+                        rpm = rpm + ',' + module
+                        echo "found" + rpm
+                        if (latestIsoContents.contains(module)){
+                            inIso = true
+                        }
+                    }
+                }
+            } catch (err) {
+                echo "Error processing pom"
+            }
+            matchRPMConvention = null
+        }
+    }
+    write_to_report(repo, rpm)
+}
+
+def init_report() {
+    def exists = fileExists 'repo_2_rpm.csv'
+    if (exists) {
+        sh "rm ./repo_2_rpm.csv"
+    }
+    outString = "REPO,In ENM ISO,RPM\r\n"
+    writeFile file: './repo_2_rpm.csv', text: outString
+}
+
+
+def write_to_report(repo, rpm) {
+    readContent = readFile './repo_2_rpm.csv'
+    outString = readContent + repo +","+inIso+ rpm + "\r\n"
+    writeFile file: './repo_2_rpm.csv', text: outString
+}
+
+def get_iso_content(){
+    latestIsoVersion = sh(script: 'wget -q -O - --no-check-certificate "https://cifwk-oss.lmera.ericsson.se/getlatestiso/?product=ENM&passedOnly=False"', returnStdout: true)
+    postData = '{"isoName":"ERICenm_CXP9027091","isoVersion":"'+latestIsoVersion+'","pretty":true,"showestware":false}'
+    contentsRestCall = 'wget -q -O - --no-check-certificate --post-data=\''+postData+'\' https://cifwk-oss.lmera.ericsson.se/getPackagesInISO/'
+    latestIsoContents = sh(script: contentsRestCall, returnStdout: true)
+    return latestIsoContents
+}

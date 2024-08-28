@@ -1,0 +1,340 @@
+pipeline {
+    agent { label 'GridEngine' }
+    options {
+        timeout(time: 300, unit: 'MINUTES')
+        timestamps()
+    }
+    stages {
+        stage('Clone Repos') {
+            steps {
+                script {
+                    env.short_date = sh(script: "date '+%Y-%m-%d'", returnStdout: true).trim()
+                }
+                clone_ci_repo()
+                clone_all()
+            }
+        }
+        stage('Check For Exclusions') {
+            steps {
+                check_all()
+            }
+        }
+        stage('Generate Report') {
+            steps {
+               script {
+                   if(generate_html_report()){
+                       println "Sonar exclusions report genereted succesfully!\n https://fem144-eiffel004.lmera.ericsson.se:8443/jenkins/job/${JOB_NAME}/lastSuccessfulBuild/artifact/SQ_Scan_Report.html"
+                   }
+               }
+                //print_report()
+                create_csv()
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'violationCnt.txt,SQ_Scan_Report.csv,SQ_Scan_Report.html,simplegrid.css', allowEmptyArchive: true, onlyIfSuccessful: true
+        }
+    }
+}
+
+
+
+
+def clone_ci_repo(){
+   sh '''
+       [ -d ci-pipeline-jenkins-config ] && rm -rf ci-pipeline-jenkins-config
+       git clone ssh://gerritmirror-ha.lmera.ericsson.se:29418/OSS/com.ericsson.oss.de/ci-pipeline-jenkins-config
+       \\cp ci-jenkins-config/jenkinsFiles/axisPipelineJenkinsFiles/simplegrid.css .
+   '''
+}
+
+def clone_all() {
+    projectsFileA = readFile('ci-jenkins-config/projects_release')
+    projectsFileB = readFile('ci-jenkins-config/projects_release_silent')
+    if(!projectsFileA.endsWith("\n")){
+        projectsFileA=projectsFileA+"\n"
+    }
+    projectsFile = projectsFileA + projectsFileB
+    println "Repos to check:\n " + projectsFile
+
+    projectsFile.split('\n').each {
+        project_name -> sonarExclusionClone(project_name)
+    }
+}
+
+def sonarExclusionClone(repoToCheck) {
+    repoToCheck = repoToCheck.replace("\r", "")
+    cloneDirLong = repoToCheck.split(',').first() // to remove Fem and other reference after first ","
+    cloneDir = cloneDirLong.split('/').last() 
+    echo "checking repo : " + repoToCheck
+    if (cloneDirLong.contains("servicegroup")) {
+        cloneDir = cloneDir + "_sg"
+    }
+    def dirExists = fileExists cloneDir
+    if (dirExists) {
+        if (isDirEmpty(cloneDir)) {
+            echo "Directory empty, deleting :" + cloneDir
+            sh "rmdir ${cloneDir}"
+            dirExists = false
+        }
+    }
+    if (dirExists) {
+        dir(cloneDir) {
+            echo "Directory already cloned, pulling updates: "
+            sh "git pull origin master"
+        }
+    } else {
+        echo "Directory does not exist, cloning to: " + cloneDir
+
+        sh "git clone ${GERRIT_MIRROR}/${cloneDirLong} ${cloneDir}"
+    }
+}
+
+def isDirEmpty(dirName) {
+    dir(dirName) {
+        def files = sh(script: "ls", returnStdout: true).trim()
+        if (files == null || files == "") {
+            echo dirName + " IS EMPTY"
+            return true
+        } else {
+            echo dirName + " IS NOT EMPTY"
+            return false
+        }
+    }
+}
+
+
+def check_all() {
+    init_report()
+    projectsFile.split('\n').each {
+        project_name -> sonarExclusionCheck(project_name)
+    }
+}
+
+def init_report() {
+    def exists = fileExists 'violationCnt.txt'
+    if (exists) {
+        sh "rm ./violationCnt.txt"
+    }
+    sh "touch ./violationCnt.txt"
+
+    def deltaFileExists = fileExists 'delta.txt'
+    if (deltaFileExists) {
+        sh "rm ./delta.txt"
+    }
+}
+
+def sonarExclusionCheck(repoToCheck) {
+    repoToCheck = repoToCheck.replace("\r", "")
+    cloneDirLong = repoToCheck.split(',').first()  // to remove Fem and other reference after first ","
+    cloneDir = cloneDirLong.split('/').last()
+    echo "checking repo: " + cloneDirLong
+    if (cloneDirLong.contains("servicegroup")) {
+        cloneDir = cloneDir + "_sg"
+    }
+
+    dir(cloneDir) {
+        pomCheck()
+        effectivePomCheck()
+        annotationsCheck()
+        write_to_report(cloneDir)
+    }
+}
+
+
+
+def pomCheck() {
+    issueIgnoreCount = 0
+    skipCount = 0
+    coverageExclusionsCount = 0
+    exclusionsCount = 0
+    lombokExclusionsCount = 0
+    issueIgnoreCountWildcard = 0
+    skipCountWildcard = 0
+    coverageExclusionsCountWildcard = 0
+    exclusionsCountWildcard = 0
+    exclusions = sh(script: 'find . -name "pom.xml" -print | grep -Eiv "src/test|testsuite" | xargs grep /sonar.exclusions||true', returnStdout: true)
+    issueIgnore = sh(script: 'find . -name "pom.xml" -print | grep -Eiv "src/test|testsuite" | xargs grep /sonar.issue.ignore||true', returnStdout: true)
+    skip = sh(script: 'find . -name "pom.xml" -print | grep -Eiv "src/test|testsuite" | xargs grep /sonar.skip||true', returnStdout: true)
+    coverageExclusions = sh(script: 'find . -name "pom.xml" -print | grep -Eiv "src/test|testsuite" | xargs grep /sonar.coverage.exclusions||true', returnStdout: true)
+    lombokExclusions = sh(script: 'find . -name "pom.xml" -print | grep -Eiv "src/test|testsuite" | xargs grep "<artifactId>lombok</artifactId>"||true', returnStdout: true)
+
+    if (exclusions != "") {
+        exclusions_array = exclusions.split('\n')
+        for (int i = 0; i < exclusions_array.size(); i++) {
+            if (exclusions_array[i].contains("*")) {
+                exclusionsCountWildcard++
+            }
+            if (exclusions_array[i] != "") {
+                exclusionsCount++
+            }
+        }
+    }
+    if (issueIgnore != "") {
+        issueIgnore_array = issueIgnore.split('\n')
+        for (int i = 0; i < issueIgnore_array.size(); i++) {
+            if (issueIgnore_array[i].contains("*")) {
+                issueIgnoreCountWildcard++
+            }
+            issueIgnoreCount++
+        }
+    }
+
+    if (skip != "") {
+        skip_array = skip.split('\n')
+        for (int i = 0; i < skip_array.size(); i++) {
+            if (skip_array[i].contains("*")) {
+                skipCountWildcard++
+            }
+            skipCount++
+        }
+    }
+    if (coverageExclusions != "") {
+        coverageExclusions_array = coverageExclusions.split('\n')
+        for (int i = 0; i < coverageExclusions_array.size(); i++) {
+            if (coverageExclusions_array[i].contains("*")) {
+                coverageExclusionsCountWildcard++
+            }
+            coverageExclusionsCount++
+        }
+    }
+    if (lombokExclusions != "") {
+        lombokExclusions_array = lombokExclusions.split('\n')
+        for (int i = 0; i < lombokExclusions_array.size(); i++) {
+            lombokExclusionsCount++
+        }
+    }
+}
+
+
+def effectivePomCheck() {
+    sh '/proj/ciexadm200/tools/apache-maven-3.5.3/bin/mvn help:effective-pom>effectivepom.txt||true'
+    EPissueIgnoreCount = 0
+    EPskipCount = 0
+    EPcoverageExclusionsCount = 0
+    EPexclusionsCount = 0
+    EPissueIgnoreCountWildcard = 0
+    EPskipCountWildcard = 0
+    EPcoverageExclusionsCountWildcard = 0
+    EPexclusionsCountWildcard = 0
+    EPlombokExclusionsCount = 0
+
+    EPexclusions = sh(script: 'grep /sonar.\\.exclusions effectivepom.txt | grep -Eiv "src/test|testsuite"||true', returnStdout: true) // to escape dot wildcard
+    EPissueIgnore = sh(script: 'grep /sonar.issue.ignore effectivepom.txt | grep -Eiv "src/test|testsuite"||true', returnStdout: true)
+    EPskip = sh(script: 'grep /sonar.skip effectivepom.txt | grep -Eiv "src/test|testsuite"||true', returnStdout: true)
+    EPcoverageExclusions = sh(script: 'grep /sonar.coverage.exclusions effectivepom.txt | grep -Eiv "src/test|testsuite"||true', returnStdout: true)
+    EPlombokExclusions = sh(script: 'grep "<artifactId>lombok</artifactId>" effectivepom.txt | grep -Eiv "src/test|testsuite"||true', returnStdout: true)
+
+    if (EPexclusions != "") {
+        EPexclusions_array = EPexclusions.split('\n')
+        for (int i = 0; i < EPexclusions_array.size(); i++) {
+            if (EPexclusions_array[i].contains("*")) {
+                EPexclusionsCountWildcard++
+            }
+            if (EPexclusions_array[i] != "") {
+                EPexclusionsCount++
+            }
+        }
+    }
+    if (EPissueIgnore != "") {
+        EPissueIgnore_array = EPissueIgnore.split('\n')
+        for (int i = 0; i < EPissueIgnore_array.size(); i++) {
+            if (EPissueIgnore_array[i].contains("*")) {
+                EPissueIgnoreCountWildcard++
+            }
+            EPissueIgnoreCount++
+        }
+    }
+    if (EPskip != "") {
+        EPskip_array = EPskip.split('\n')
+        for (int i = 0; i < EPskip_array.size(); i++) {
+            if (EPskip_array[i].contains("*")) {
+                EPskipCountWildcard++
+            }
+            EPskipCount++
+        }
+    }
+    if (EPcoverageExclusions != "") {
+        EPcoverageExclusions_array = EPcoverageExclusions.split('\n')
+        for (int i = 0; i < EPcoverageExclusions_array.size(); i++) {
+            if (EPcoverageExclusions_array[i].contains("*")) {
+                EPcoverageExclusionsCountWildcard++
+            }
+            EPcoverageExclusionsCount++
+        }
+    }
+    if (EPlombokExclusions != "") {
+        EPlombokExclusions_array = EPlombokExclusions.split('\n')
+        for (int i = 0; i < EPlombokExclusions_array.size(); i++) {
+            EPlombokExclusionsCount++
+        }
+    }
+}
+
+
+def annotationsCheck() {
+    suppressWarnCount = 0
+    atGeneratedCount = 0
+    nonsonarCount = 0
+    def suppressWarn = sh(script: 'find . -type f \\( -name "*.java" -or -name "*.groovy" \\) -print | grep -Eiv "src/test|testsuite" | xargs grep @SuppressWarning||true', returnStdout: true)
+    def atGenerated = sh(script: 'find . -type f \\( -name "*.java" -or -name "*.groovy" \\) -print | grep -Eiv "src/test|testsuite" | xargs grep @Generated ||true', returnStdout: true)
+    def nonsonar = sh(script: 'find . -type f \\( -name "*.java" -or -name "*.groovy" \\) -print | grep -Eiv "src/test|testsuite" | xargs grep NOSONAR| wc -l ||true', returnStdout: true)
+
+    if (suppressWarn.size() > 0) {
+        suppressWarn_array = suppressWarn.split('\n')
+        for (int i = 0; i < suppressWarn_array.size(); i++) {
+            suppressWarnCount++
+        }
+    }
+    if (atGenerated.size() > 0) {
+        atGenerated_array = atGenerated.split('\n')
+        for (int i = 0; i < atGenerated_array.size(); i++) {
+            atGeneratedCount++
+        }
+    }
+    nonsonarCount = nonsonar.toInteger()
+    //if (nonsonar.size() > 0) {
+    //    nonsonar_array = nonsonar.split('\n')
+    //    for (int i = 0; i < nonsonar.size(); i++) {
+    //        nonsonarCount++
+    //    }
+    //}
+}
+
+
+def write_to_report(repoToCheck) {
+    readContent = readFile '../violationCnt.txt'
+    outString = readContent + repoToCheck + "," + issueIgnoreCount + "," + skipCount + "," + coverageExclusionsCount + "," + exclusionsCount + "," + lombokExclusionsCount + "," + issueIgnoreCountWildcard + "," + skipCountWildcard + "," + coverageExclusionsCountWildcard + "," + exclusionsCountWildcard + "," + EPissueIgnoreCount + "," + EPskipCount + "," + EPcoverageExclusionsCount + "," + EPexclusionsCount + "," + EPlombokExclusionsCount + "," + EPissueIgnoreCountWildcard + "," + EPskipCountWildcard + "," + EPcoverageExclusionsCountWildcard + "," + EPexclusionsCountWildcard + "," + suppressWarnCount + "," + atGeneratedCount + "," + nonsonarCount + "\r\n"
+    writeFile file: '../violationCnt.txt', text: outString
+}
+
+def print_report() {
+    println "*********** Report TXT in ws ***********"
+    readTmpViolationCntFile = readFile file: 'violationCnt.txt'
+    println(readTmpViolationCntFile)
+}
+
+def create_csv() {
+    readContent = readFile './violationCnt.txt'
+    outString = 'repo,issueIgnoreCount,skipCount,coverageExclusionsCount,exclusionsCount,lombokExclusionsCount,issueIgnoreCountWildcard,skipCountWildcard,coverageExclusionsCountWildcard,exclusionsCountWildcard,EPissueIgnoreCount,EPskipCount,EPcoverageExclusionsCount,EPexclusionsCount,EPlombokExclusionsCount,EPissueIgnoreCountWildcard,EPskipCountWildcard,EPcoverageExclusionsCountWildcard,EPexclusionsCountWildcard,suppressWarnCount,atGeneratedCount,nonsonarCount' + readContent
+    writeFile file: './SQ_Scan_Report.csv', text: outString
+}
+
+def generate_html_report() {
+    violCntFile = './violationCnt.txt'
+    def violCntExists = fileExists violCntFile
+
+    if (!violCntExists) {
+        println "Something when wrong: violationCnt.txt was not created"
+        return false
+    }
+    def status = sh(returnStatus: true, script: "python ./ci-pipeline-jenkins-config/ci-jenkins-config/jenkinsFiles/axisPipelineJenkinsFiles/SQ_Scan_Report.py")
+    if(status == 0){
+        return true
+    }else{
+        println "SQ_Scan_Report.py execution returned error"
+        sh 'exit 1'
+    }
+}

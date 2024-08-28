@@ -1,0 +1,17 @@
+OSS/com.ericsson.oss.services.shm/cppinventorysynchservice
+OSS/com.ericsson.td/ERICepsilon
+OSS/com.ericsson.oss.mediation.pm.handlers/tsp-pm-handlers-code
+OSS/com.ericsson.oss.mediation.cm.handlers/com-ecim-retrieve-mim-handlers
+OSS/com.ericsson.oss.itpf.datalayer.dps.3pp/neo4j-api
+OSS/com.ericsson.oss.models.pmic.mediation.handlers/pmic-dps-handler-code
+OSS/com.ericsson.oss.itpf.datalayer.dps.3pp/neo4j
+OSS/com.ericsson.oss.mediation.model.flows/ecim-cm-heartbeat-supervision-flow,fem171
+OSS/com.ericsson.oss.mediation.cm.models.flow/sgsn-create-subscription-flow,fem171
+OSS/com.ericsson.oss.presentation.client.asr/asr-ui,fem140
+OSS/com.ericsson.oss.mediation.pm.handlers/er6000-pm-handlers-code,fem140
+OSS/com.ericsson.oss.mediation.adapter/netconf-resource-adapter,fem140
+OSS/com.ericsson.oss.mediation.netconf.handlers/netconf-session-releaser-handler,fem140
+OSS/com.ericsson.oss.mediation.cba.handlers/cba-netconf-connect-handler,fem140
+OSS/com.ericsson.oss.mediation.cba.handlers/cba-netconf-disconnect-handler,fem140
+OSS/com.ericsson.oss.mediation.handlers/ssh-transport-connect-handler,fem140
+OSS/com.ericsson.oss.mediation.util/cba-netconf-manager,fem140
